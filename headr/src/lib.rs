@@ -1,8 +1,7 @@
 use clap::{App, Arg};
-use std::collections::VecDeque;
 use std::error::Error;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read};
 
 type MyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -65,54 +64,39 @@ pub fn get_args() -> MyResult<Config> {
 
 pub fn run(config: Config) -> MyResult<()> {
     let num_files = config.files.len();
-    let first_file = config.files[0].clone();
-    let mut result: Vec<&[u8]> = vec![];
-    for filename in config.files {
-        match open(&filename) {
-            Err(err) => eprintln!("head: {}: {}", filename, err),
-            Ok(f) => {
+
+    for (file_num, filename) in config.files.iter().enumerate() {
+        match open(filename) {
+            Err(err) => eprintln!("{}: {}", filename, err),
+            Ok(mut file) => {
                 if num_files > 1 {
-                    if filename != first_file {
-                        println!();
-                    }
-                    println!("==> {} <==", filename);
+                    println!(
+                        "{}==> {} <==",
+                        if file_num > 0 { "\n" } else { "" },
+                        filename
+                    );
                 }
-                if let Some(c) = config.bytes {
-                    read_bytes(f, c);
+
+                if let Some(num_bytes) = config.bytes {
+                    let mut handle = file.take(num_bytes as u64);
+                    let mut buffer = vec![0; num_bytes];
+                    let bytes_read = handle.read(&mut buffer)?;
+                    print!("{}", String::from_utf8_lossy(&buffer[..bytes_read]));
                 } else {
-                    read_lines(f, config.lines);
+                    let mut line = String::new();
+                    for _ in 0..config.lines {
+                        let bytes = file.read_line(&mut line)?;
+                        if bytes == 0 {
+                            break;
+                        }
+                        print!("{}", line);
+                        line.clear();
+                    }
                 }
             }
         }
     }
     Ok(())
-}
-
-fn read_lines(f: Box<dyn BufRead>, n: usize) {
-    for line in f.split(0xA).take(n) {
-        let line = line.unwrap();
-        let result = String::from_utf8_lossy(&line);
-        println!("{}", result);
-    }
-}
-
-fn read_bytes(f: Box<dyn BufRead>, c: usize) {
-    let mut u8buffer = vec![];
-    let mut counter = c;
-    'outer: for line in f.split(0xA) {
-        let mut line = line.unwrap();
-        line.push(0xA);
-        let mut line = VecDeque::from(line);
-        while let Some(x) = line.pop_front() {
-            u8buffer.push(x);
-            counter -= 1;
-            if counter == 0 {
-                break 'outer;
-            }
-        }
-    }
-    let result = String::from_utf8_lossy(&u8buffer);
-    print!("{}", result);
 }
 
 fn parse_positive_int(val: &str) -> MyResult<usize> {
