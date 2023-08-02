@@ -96,50 +96,46 @@ pub fn run(config: Config) -> MyResult<()> {
             Err(err) => eprintln!("{}: {}", filename, err),
             Ok(file) => {
                 let fileinfo = count(file)?;
+                println!(
+                    "{}{}{}{}{}",
+                    format_field(fileinfo.num_lines, config.lines),
+                    format_field(fileinfo.num_words, config.words),
+                    format_field(fileinfo.num_bytes, config.bytes),
+                    format_field(fileinfo.num_chars, config.chars),
+                    if filename == "-" {
+                        "".to_string()
+                    } else {
+                        format!(" {}", filename)
+                    }
+                );
 
                 total_lines += fileinfo.num_lines;
                 total_words += fileinfo.num_words;
                 total_bytes += fileinfo.num_bytes;
                 total_chars += fileinfo.num_chars;
-
-                if config.lines {
-                    print!("{:>8}", fileinfo.num_lines);
-                }
-                if config.words {
-                    print!("{:>8}", fileinfo.num_words);
-                }
-                if config.bytes {
-                    print!("{:>8}", fileinfo.num_bytes);
-                }
-                if config.chars {
-                    print!("{:>8}", fileinfo.num_chars);
-                }
-                if filename != "-" {
-                    println!(" {}", filename);
-                } else {
-                    println!();
-                }
             }
         }
     }
 
     if config.files.len() > 1 {
-        if config.lines {
-            print!("{:>8}", total_lines);
-        }
-        if config.words {
-            print!("{:>8}", total_words);
-        }
-        if config.bytes {
-            print!("{:>8}", total_bytes);
-        }
-        if config.chars {
-            print!("{:>8}", total_chars);
-        }
-        println!(" total");
+        println!(
+            "{}{}{}{} total",
+            format_field(total_lines, config.lines),
+            format_field(total_words, config.words),
+            format_field(total_bytes, config.bytes),
+            format_field(total_chars, config.chars),
+        );
     }
 
     Ok(())
+}
+
+fn format_field(value: usize, show: bool) -> String {
+    if show {
+        format!("{:>8}", value)
+    } else {
+        "".to_string()
+    }
 }
 
 fn open(filename: &str) -> MyResult<Box<dyn BufRead>> {
@@ -154,27 +150,18 @@ pub fn count(mut file: impl BufRead) -> MyResult<FileInfo> {
     let mut num_words = 0;
     let mut num_bytes = 0;
     let mut num_chars = 0;
+    let mut line = String::new();
 
-    let mut buffer = String::new();
     loop {
-        let byte = file.read_line(&mut buffer)?;
-        if byte == 0 {
+        let line_bytes = file.read_line(&mut line)?;
+        if line_bytes == 0 {
             break;
         }
-
+        num_bytes += line_bytes;
         num_lines += 1;
-        let mut prev = char::MAX;
-        for c in buffer.chars() {
-            if prev.is_ascii_whitespace() || prev == char::MAX {
-                if c.is_alphanumeric() || c.is_ascii_punctuation() {
-                    num_words += 1;
-                }
-            }
-            prev = c;
-            num_chars += 1;
-        }
-        num_bytes += buffer.bytes().count();
-        buffer.clear();
+        num_words += line.split_whitespace().count();
+        num_chars += line.chars().count();
+        line.clear();
     }
 
     Ok(FileInfo {
@@ -187,6 +174,8 @@ pub fn count(mut file: impl BufRead) -> MyResult<FileInfo> {
 
 #[cfg(test)]
 mod tests {
+    use crate::format_field;
+
     use super::{count, FileInfo};
     use std::io::Cursor;
 
@@ -202,5 +191,12 @@ mod tests {
             num_bytes: 48,
         };
         assert_eq!(info.unwrap(), expected);
+    }
+
+    #[test]
+    fn test_format_field() {
+        assert_eq!(format_field(1, false), "");
+        assert_eq!(format_field(3, true), "       3");
+        assert_eq!(format_field(10, true), "      10");
     }
 }
