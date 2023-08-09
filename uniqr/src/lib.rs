@@ -49,40 +49,42 @@ pub fn get_args() -> MyResult<Config> {
 
 pub fn run(config: Config) -> MyResult<()> {
     let mut file = open(&config.in_file).map_err(|e| format!("{}: {}", config.in_file, e))?;
+    let mut out_file: Box<dyn Write> = match &config.out_file {
+        Some(out_name) => Box::new(File::create(out_name)?),
+        _ => Box::new(io::stdout()),
+    };
     let mut line = String::new();
-    let mut prev = String::new();
-    let mut count = 1;
-    let mut out: Box<dyn Write>;
+    let mut previous = String::new();
+    let mut count: u64 = 0;
 
-    if let Some(s) = config.out_file {
-        out = Box::new(File::create(s)?);
-    } else {
-        out = Box::new(io::stdout());
-    }
+    let mut print = |count: u64, text: &str| -> MyResult<()> {
+        if count > 0 {
+            if config.count {
+                write!(out_file, "{:>4} {}", count, text)?;
+            } else {
+                write!(out_file, "{}", text)?;
+            }
+        }
+        Ok(())
+    };
 
     loop {
         let bytes = file.read_line(&mut line)?;
-
         if bytes == 0 {
-            if config.count && !prev.is_empty() {
-                write!(out, "{:>4} ", count.to_string())?;
-            }
-            write!(out, "{}", prev)?;
             break;
         }
-        if prev.trim() == line.trim() {
-            count += 1;
-        } else {
-            if config.count && !prev.is_empty() {
-                write!(out, "{:>4} ", count.to_string())?;
-            }
-            write!(out, "{}", prev)?;
-            count = 1;
-            prev = line.clone();
+
+        if line.trim_end() != previous.trim_end() {
+            print(count, &previous)?;
+            previous = line.clone();
+            count = 0;
         }
 
+        count += 1;
         line.clear();
     }
+
+    print(count, &previous)?;
     Ok(())
 }
 
