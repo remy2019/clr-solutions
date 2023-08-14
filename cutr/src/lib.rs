@@ -1,6 +1,6 @@
 use crate::Extract::*;
 use clap::{App, Arg};
-use csv::{ReaderBuilder, StringRecord};
+use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use regex::Regex;
 use std::{
     error::Error,
@@ -156,97 +156,65 @@ pub fn run(config: Config) -> MyResult<()> {
     for filename in &config.files {
         match open(filename) {
             Err(err) => eprintln!("{}: {}", filename, err),
-            Ok(file) => {
-                let mut result = vec![];
-                match &config.extract {
-                    Chars(char_pos) => {
-                        result = file
-                            .lines()
-                            .map(|ref line| {
-                                extract_chars(line.as_ref().unwrap().as_str(), char_pos)
-                            })
-                            .collect::<Vec<_>>();
+            Ok(file) => match &config.extract {
+                Chars(char_pos) => {
+                    for line in file.lines() {
+                        println!("{}", extract_chars(&line?, char_pos));
                     }
-                    Bytes(byte_pos) => {
-                        result = file
-                            .lines()
-                            .map(|ref line| {
-                                extract_bytes(line.as_ref().unwrap().as_str(), byte_pos)
-                            })
-                            .collect::<Vec<_>>();
+                }
+                Bytes(byte_pos) => {
+                    for line in file.lines() {
+                        println!("{}", extract_bytes(&line?, byte_pos));
                     }
-                    Fields(field_pos) => {
-                        let mut reader = ReaderBuilder::new()
-                            .delimiter(config.delimiter)
-                            .from_reader(file);
+                }
+                Fields(field_pos) => {
+                    let mut reader = ReaderBuilder::new()
+                        .delimiter(config.delimiter)
+                        .has_headers(false)
+                        .from_reader(file);
 
-                        let header = reader.headers()?;
-                        result.push(
-                            extract_fields(header, field_pos)
-                                .join(char::from(config.delimiter).to_string().as_str())
-                                .to_owned(),
-                        );
-                        for record in reader.records() {
-                            let record = record?;
-                            result.push(
-                                extract_fields(&record, field_pos)
-                                    .join(char::from(config.delimiter).to_string().as_str()),
-                            );
-                        }
+                    let mut wtr = WriterBuilder::new()
+                        .delimiter(config.delimiter)
+                        .from_writer(io::stdout());
+
+                    for record in reader.records() {
+                        let record = record?;
+                        wtr.write_record(extract_fields(&record, field_pos))?;
                     }
-                    _ => unreachable!(),
                 }
-                for line in result {
-                    println!("{}", line);
-                }
-            }
+                _ => unreachable!(),
+            },
         }
     }
     Ok(())
 }
 
 fn extract_chars(line: &str, char_pos: &[Range<usize>]) -> String {
+    let chars: Vec<_> = line.chars().collect();
     char_pos
         .iter()
-        .map(|pos| {
-            line.chars()
-                .enumerate()
-                .filter(|(i, _)| pos.contains(i))
-                .map(|(_, c)| c)
-                .collect::<String>()
-        })
-        .collect::<Vec<String>>()
-        .join("")
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| chars.get(i)))
+        .collect()
 }
 
 fn extract_bytes(line: &str, byte_pos: &[Range<usize>]) -> String {
-    byte_pos
+    let bytes = line.as_bytes();
+    let selected: Vec<_> = byte_pos
         .iter()
-        .map(|pos| {
-            line.bytes()
-                .enumerate()
-                .filter(|(i, _)| pos.contains(i))
-                .map(|(_, b)| b)
-                .collect::<Vec<u8>>()
-        })
-        .map(|v| {
-            let temp = String::from_utf8_lossy(&v);
-            temp.into_owned()
-        })
-        .collect::<Vec<_>>()
-        .join("")
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| bytes.get(i)).copied())
+        .collect();
+
+    String::from_utf8_lossy(&selected).into_owned()
 }
 
-fn extract_fields(record: &StringRecord, field_pos: &[Range<usize>]) -> Vec<String> {
-    let mut buffer = vec![];
-    field_pos.into_iter().for_each(|pos| {
-        record.iter().enumerate().for_each(|(i, rec)| {
-            if pos.contains(&i) {
-                buffer.push(rec.to_owned());
-            }
-        })
-    });
-    buffer
+fn extract_fields<'a>(record: &'a StringRecord, field_pos: &[Range<usize>]) -> Vec<&'a str> {
+    field_pos
+        .iter()
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| record.get(i)))
+        .collect()
 }
 
 #[cfg(test)]
