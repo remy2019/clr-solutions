@@ -4,6 +4,7 @@ use std::{
     error::Error,
     fs::{self, File},
     io::{self, BufRead, BufReader},
+    mem,
 };
 use walkdir::WalkDir;
 
@@ -83,26 +84,31 @@ pub fn get_args() -> MyResult<Config> {
 
 pub fn run(config: Config) -> MyResult<()> {
     let entries = find_files(&config.files, config.recursive);
-    for entry in &entries {
+    let num_files = entries.len();
+    let print = |fname: &str, val: &str| {
+        if num_files > 1 {
+            print!("{}:{}", fname, val);
+        } else {
+            print!("{}", val);
+        }
+    };
+    for entry in entries {
         match entry {
             Err(e) => eprintln!("{}", e),
-            Ok(filename) => match open(filename) {
+            Ok(filename) => match open(&filename) {
                 Err(e) => eprintln!("{}: {}", filename, e),
-                Ok(file) => {
-                    let matches = find_lines(file, &config.pattern, config.invert_match)?;
-                    let header = if entries.len() > 1 {
-                        format!("{}:", filename)
-                    } else {
-                        "".to_owned()
-                    };
-                    if config.count {
-                        println!("{}{}", header, matches.len());
-                    } else {
-                        for line in matches {
-                            print!("{}{}", header, line);
+                Ok(file) => match find_lines(file, &config.pattern, config.invert_match) {
+                    Err(e) => eprintln!("{}", e),
+                    Ok(matches) => {
+                        if config.count {
+                            print(&filename, &format!("{}\n", matches.len()));
+                        } else {
+                            for line in &matches {
+                                print(&filename, line);
+                            }
                         }
                     }
-                }
+                },
             },
         }
     }
@@ -123,94 +129,51 @@ fn find_lines<T: BufRead>(
     invert_match: bool,
 ) -> MyResult<Vec<String>> {
     let mut line = String::new();
-    let mut result = vec![];
+    let mut matches = vec![];
+
     loop {
-        let byte = file.read_line(&mut line)?;
-        if byte == 0 {
+        let bytes = file.read_line(&mut line)?;
+        if bytes == 0 {
             break;
         }
         if pattern.is_match(&line) ^ invert_match {
-            result.push(line.clone());
+            matches.push(mem::take(&mut line));
         }
         line.clear();
     }
-    Ok(result)
+    Ok(matches)
 }
 
 fn find_files(paths: &[String], recursive: bool) -> Vec<MyResult<String>> {
-    let mut result = vec![];
-    for path in paths.iter() {
-        if path == "-" {
-            result.push(Ok("-".to_string()));
-            break;
-        }
-        if let Ok(meta) = fs::metadata(path) {
-            if meta.file_type().is_dir() {
-                if recursive {
-                    WalkDir::new(path)
-                        .into_iter()
-                        .filter(|entry| entry.is_ok())
-                        .filter(|x| !x.as_ref().unwrap().file_type().is_dir())
-                        .for_each(|entry| {
-                            result.push(Ok(entry.unwrap().path().display().to_string()));
-                        })
-                } else {
-                    result.push(Err(From::from(format!("{} is a directory", path))));
+    let mut results = vec![];
+
+    for path in paths {
+        match path.as_str() {
+            "-" => results.push(Ok(path.to_string())),
+            _ => match fs::metadata(path) {
+                Ok(metadata) => {
+                    if metadata.is_dir() {
+                        if recursive {
+                            for entry in WalkDir::new(path)
+                                .into_iter()
+                                .flatten()
+                                .filter(|e| e.file_type().is_file())
+                            {
+                                results.push(Ok(entry.path().display().to_string()));
+                            }
+                        } else {
+                            results.push(Err(From::from(format!("{} is a directory", path))));
+                        }
+                    } else if metadata.is_file() {
+                        results.push(Ok(path.to_string()));
+                    }
                 }
-            } else {
-                result.push(Ok(path.clone()));
-            }
-        } else {
-            result.push(Err(fs::File::open(path)
-                .map_err(|e| format!("{}: {}", path, e))
-                .err()
-                .unwrap()
-                .into()));
+                Err(e) => results.push(Err(From::from(format!("{}: {}", path, e)))),
+            },
         }
     }
 
-    result
-    // -------my attemp to solve it functionally-------
-    //
-    // let temp = paths
-    //     .iter()
-    //     .cloned()
-    //     .map(|path| {
-    //         fs::metadata(&path).and_then(|meta| {
-    //             meta.is_dir()
-    //                 .then(|| {
-    //                     recursive
-    //                         .then_some(
-    //                             WalkDir::new(&path)
-    //                                 .into_iter()
-    //                                 .filter(|x| x.is_ok())
-    //                                 .filter(|x| !x.as_ref().unwrap().file_type().is_dir())
-    //                                 .map(|entry| entry.unwrap().path().display().to_string())
-    //                                 .collect(),
-    //                         )
-    //                         .ok_or::<Box<dyn Error>>(From::from(format!("{} is a directory", path)))
-    //                 })
-    //                 .unwrap_or(Ok(vec![path]))
-    //         })
-    //     })
-    //     .collect::<Vec<_>>();
-    // dbg!(&temp);
-    // let mut result = vec![];
-    // for item in temp {
-    //     match item {
-    //         Ok(vector) => {
-    //             for s in vector.into_iter().map(|s| Ok(s)) {
-    //                 result.push(s);
-    //             }
-    //         }
-    //         Err(e) => {
-    //             result.push(Err(e));
-    //         }
-    //     }
-    // }
-    // result
-    //
-    //--------------------------------------
+    results
 }
 
 #[cfg(test)]
