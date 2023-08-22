@@ -5,7 +5,7 @@ use regex::Regex;
 use std::{
     error::Error,
     fs::File,
-    io::{BufRead, Read, Seek},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
 };
 
 type MyResult<T> = Result<T, Box<dyn Error>>;
@@ -122,11 +122,11 @@ pub fn run(config: Config) -> MyResult<()> {
                     );
                 }
                 let (total_lines, total_bytes) = count_lines_bytes(filename)?;
-                let reader = std::io::BufReader::new(file);
-                if let Some(ref byte) = config.bytes {
-                    print_bytes(reader, byte, total_bytes)?;
+                let file = BufReader::new(file);
+                if let Some(num_bytes) = &config.bytes {
+                    print_bytes(file, num_bytes, total_bytes)?;
                 } else {
-                    print_lines(reader, &config.lines, total_lines)?;
+                    print_lines(file, &config.lines, total_lines)?;
                 }
             }
         }
@@ -135,61 +135,76 @@ pub fn run(config: Config) -> MyResult<()> {
 }
 
 fn count_lines_bytes(filename: &str) -> MyResult<(i64, i64)> {
-    let file = std::io::BufReader::new(File::open(filename)?);
-    let lines = file.lines().count();
-    let file = std::io::BufReader::new(File::open(filename)?);
-    let bytes = file.bytes().count();
-    Ok((lines as i64, bytes as i64))
+    let mut file = BufReader::new(File::open(filename)?);
+    let mut num_lines = 0;
+    let mut num_bytes = 0;
+    let mut buf = Vec::new();
+    loop {
+        let bytes_read = file.read_until(b'\n', &mut buf)?;
+        if bytes_read == 0 {
+            break;
+        }
+        num_lines += 1;
+        num_bytes += bytes_read as i64;
+        buf.clear();
+    }
+
+    Ok((num_lines, num_bytes))
 }
 
 fn print_bytes<T>(mut file: T, num_bytes: &TakeValue, total_bytes: i64) -> MyResult<()>
 where
     T: Read + Seek,
 {
-    if let Some(n) = get_start_index(num_bytes, total_bytes) {
-        let buffer: Vec<u8> = file
-            .bytes()
-            .skip(n as usize)
-            .filter_map(Result::ok)
-            .collect();
-        print!("{}", String::from_utf8_lossy(&buffer));
-    }
-    Ok(())
-}
-
-fn print_lines(mut file: impl BufRead, num_lines: &TakeValue, total_lines: i64) -> MyResult<()> {
-    if let Some(n) = get_start_index(num_lines, total_lines) {
-        let mut buffer = String::new();
-        let mut counter = 0;
-        loop {
-            let bytes = file.read_line(&mut buffer)?;
-            if bytes == 0 {
-                break;
-            }
-            if counter < n {
-                counter += 1;
-                buffer.clear();
-                continue;
-            }
-            print!("{}", buffer);
-            buffer.clear();
+    if let Some(start) = get_start_index(num_bytes, total_bytes) {
+        file.seek(SeekFrom::Start(start))?;
+        let mut buffer = Vec::new();
+        file.read_to_end(&mut buffer)?;
+        if !buffer.is_empty() {
+            print!("{}", String::from_utf8_lossy(&buffer));
         }
     }
     Ok(())
 }
 
+fn print_lines(mut file: impl BufRead, num_lines: &TakeValue, total_lines: i64) -> MyResult<()> {
+    if let Some(start) = get_start_index(num_lines, total_lines) {
+        let mut line_num = 0;
+        let mut buf = Vec::new();
+        loop {
+            let bytes_read = file.read_until(b'\n', &mut buf)?;
+            if bytes_read == 0 {
+                break;
+            }
+            if line_num >= start {
+                print!("{}", String::from_utf8_lossy(&buf));
+            }
+            line_num += 1;
+            buf.clear();
+        }
+    }
+
+    Ok(())
+}
+
 fn get_start_index(take_val: &TakeValue, total: i64) -> Option<u64> {
-    let empty = total == 0;
-    let exceed_or_take_zero = if let TakeNum(n) = take_val {
-        (total - n).is_negative() || n == &0
-    } else {
-        false
-    };
-    (!empty && !exceed_or_take_zero).then(|| match take_val {
-        PlusZero => 0,
-        &TakeNum(n) if n > 0 => n as u64 - 1,
-        &TakeNum(n) => (total as u64).saturating_sub(n.wrapping_neg() as u64),
-    })
+    match take_val {
+        PlusZero => {
+            if total > 0 {
+                Some(0)
+            } else {
+                None
+            }
+        }
+        TakeNum(num) => {
+            if num == &0 || total == 0 || num > &total {
+                None
+            } else {
+                let start = if num < &0 { total + num } else { num - 1 };
+                Some(if start < 0 { 0 } else { start as u64 })
+            }
+        }
+    }
 }
 
 #[cfg(test)]
