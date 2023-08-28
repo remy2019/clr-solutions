@@ -1,7 +1,8 @@
-use chrono::{naive::NaiveDate, Datelike, Local, Weekday};
+use ansi_term::Style;
+use chrono::{naive::NaiveDate, Datelike, Local};
 use clap::{App, Arg};
-use itertools::Itertools;
-use std::{error::Error, iter::zip, str::FromStr};
+use itertools::izip;
+use std::{error::Error, str::FromStr};
 
 #[derive(Debug)]
 pub struct Config {
@@ -12,7 +13,7 @@ pub struct Config {
 
 const MONTH_NAMES: [&str; 12] = [
     "January",
-    "Fabruary",
+    "February",
     "March",
     "April",
     "May",
@@ -25,7 +26,7 @@ const MONTH_NAMES: [&str; 12] = [
     "December",
 ];
 
-const DAY_NAMES: [&str; 7] = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+const LINE_WIDTH: usize = 22;
 
 type MyResult<T> = Result<T, Box<dyn Error>>;
 
@@ -119,117 +120,88 @@ fn parse_month(month: &str) -> MyResult<u32> {
 }
 
 fn format_month(year: i32, month: u32, print_year: bool, today: NaiveDate) -> Vec<String> {
-    let last_day = last_day_in_month(year, month);
-    let first_day = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
-    let mut month_buffer = vec![];
+    let first = NaiveDate::from_ymd_opt(year, month, 1).unwrap();
+    let mut days: Vec<String> = (1..first.weekday().number_from_sunday())
+        .map(|_| "  ".to_string())
+        .collect();
+    let is_today = |day: u32| year == today.year() && month == today.month() && day == today.day();
 
-    let header = format!(
-        "{:^20}",
-        format!(
-            "{}{}",
-            first_day.format("%B").to_string(),
-            if print_year {
-                first_day.format(" %Y").to_string()
-            } else {
-                "".to_string()
-            }
-        )
-    );
-    month_buffer.push(header);
-
-    let subheader = DAY_NAMES.iter().join(" ");
-    month_buffer.push(subheader);
-
-    let mut whole_week_buffer = vec![];
-    let mut week_buffer = vec![];
-    for d in first_day.iter_days() {
-        week_buffer.push(d.day());
-        if d.weekday() == Weekday::Sat {
-            whole_week_buffer.push(week_buffer.clone());
-            week_buffer.clear();
-        }
-
-        if d == last_day {
-            whole_week_buffer.push(week_buffer.clone());
-            break;
-        }
-    }
-
-    for (idx, w) in whole_week_buffer.into_iter().enumerate() {
-        let raw_week = w.iter().map(|d| format!("{:>2}", d)).join(" ");
-        let cooked_week = if idx == 0 {
-            format!("{:>20}", raw_week)
+    let last = last_day_in_month(year, month);
+    days.extend((first.day()..=last.day()).map(|num| {
+        let fmt = format!("{:>2}", num);
+        if is_today(num) {
+            Style::new().reverse().paint(fmt).to_string()
         } else {
-            format!("{:<20}", raw_week)
-        };
-        month_buffer.push(cooked_week);
-    }
-
-    let empty_line = " ".repeat(20);
-    for idx in 0..8 {
-        if month_buffer.get(idx).is_none() {
-            month_buffer.push(empty_line.clone());
+            fmt
         }
-    }
+    }));
 
-    month_buffer.iter_mut().for_each(|line| {
-        line.push_str("  ");
-    });
-
-    let contains_today = (today.year() == year) && (today.month() == month);
-    if contains_today {
-        let today_day = today.day().to_string();
-        for line in month_buffer.iter_mut().skip(2) {
-            if line.contains(&today_day) {
-                let matched = format!("{:>2}", today_day);
-                let style = ansi_term::Style::new().reverse();
-                *line = line.replace(
-                    &matched,
-                    &format!("{}{}{}", style.prefix(), matched, style.suffix()),
-                );
-                break;
-            }
+    let month_name = MONTH_NAMES[month as usize - 1];
+    let mut lines = Vec::with_capacity(8);
+    lines.push(format!(
+        "{:^20}  ",
+        if print_year {
+            format!("{} {}", month_name, year)
+        } else {
+            month_name.to_string()
         }
+    ));
+
+    lines.push("Su Mo Tu We Th Fr Sa  ".to_string());
+
+    for week in days.chunks(7) {
+        lines.push(format!(
+            "{:width$}  ",
+            week.join(" "),
+            width = LINE_WIDTH - 2
+        ));
     }
 
-    month_buffer
+    while lines.len() < 8 {
+        lines.push(" ".repeat(LINE_WIDTH));
+    }
+
+    lines
 }
 
 fn last_day_in_month(year: i32, month: u32) -> NaiveDate {
-    let mut candidate = NaiveDate::from_ymd_opt(year, month, 24).unwrap();
-    for d in 25..=32 {
-        match NaiveDate::from_ymd_opt(year, month, d as u32) {
-            Some(date) => candidate = date,
-            None => break,
-        }
-    }
-    candidate
+    let (y, m) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+
+    NaiveDate::from_ymd_opt(y, m, 1)
+        .unwrap()
+        .pred_opt()
+        .unwrap()
 }
 
 pub fn run(config: Config) -> MyResult<()> {
-    if let Some(month) = config.month {
-        let buf = format_month(config.year, month, true, config.today);
-        for line in buf {
-            println!("{}", line);
+    match config.month {
+        Some(month) => {
+            let lines = format_month(config.year, month, true, config.today);
+            println!("{}", lines.join("\n"));
         }
-    } else {
-        println!("{:>32}", config.year);
-        let mut whole_buf = vec![];
-        for i in [1, 4, 7, 10].into_iter() {
-            let mut three_buf = vec![];
-            let three_months: Vec<_> = (i..=i + 2)
+        None => {
+            println!("{:>32}", config.year);
+            let months: Vec<_> = (1..=12)
                 .map(|month| format_month(config.year, month, false, config.today))
                 .collect();
-            for ((x, y), z) in zip(
-                zip(three_months[0].iter(), three_months[1].iter()),
-                three_months[2].iter(),
-            ) {
-                three_buf.push(format!("{}{}{}", x, y, z));
+
+            for (i, chunk) in months.chunks(3).enumerate() {
+                if let [m1, m2, m3] = chunk {
+                    for lines in izip!(m1, m2, m3) {
+                        println!("{}{}{}", lines.0, lines.1, lines.2);
+                    }
+                    if i < 3 {
+                        println!();
+                    }
+                }
             }
-            whole_buf.push(three_buf.join("\n"));
         }
-        println!("{}", whole_buf.join("\n\n"));
     }
+
     Ok(())
 }
 
