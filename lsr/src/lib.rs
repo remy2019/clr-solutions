@@ -1,17 +1,15 @@
-use chrono::format;
+mod owner;
+
+use chrono::{DateTime, Local};
 use clap::{App, Arg};
+use owner::Owner;
 use std::fs;
 use std::os::unix::fs::MetadataExt;
 use std::{error::Error, path::PathBuf};
 use tabular::{Row, Table};
+use users::{get_group_by_gid, get_user_by_uid};
 
 type MyResult<T> = Result<T, Box<dyn Error>>;
-
-const RIGHT_MASKS: [u32; 9] = [
-    0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001,
-];
-
-const RIGHT_SIGN: [&str; 3] = ["r", "w", "x"];
 
 #[derive(Debug)]
 pub struct Config {
@@ -71,20 +69,19 @@ fn find_files(paths: &[String], show_hidden: bool) -> MyResult<Vec<PathBuf>> {
     for path in paths {
         match fs::metadata(path) {
             Ok(metadata) => {
-                if metadata.is_file() {
+                if metadata.is_dir() {
+                    for entry in fs::read_dir(path)? {
+                        let entry = entry?;
+                        let path = entry.path();
+                        let is_hidden = path.file_name().map_or(false, |file_name| {
+                            file_name.to_string_lossy().starts_with('.')
+                        });
+                        if !is_hidden || show_hidden {
+                            files.push(entry.path());
+                        }
+                    }
+                } else {
                     files.push(PathBuf::from(path));
-                } else if metadata.is_dir() {
-                    files.extend(
-                        fs::read_dir(path)
-                            .unwrap()
-                            .filter_map(Result::ok)
-                            .map(|entry| entry.path())
-                            .filter_map(|entry| {
-                                let name = entry.as_path().file_name().unwrap();
-                                let is_hidden = name.to_string_lossy().starts_with('.');
-                                (show_hidden || !is_hidden).then_some(entry)
-                            }),
-                    )
                 }
             }
             Err(e) => eprintln!("{}: {}", path, e),
@@ -99,29 +96,31 @@ fn format_output(paths: &[PathBuf]) -> MyResult<String> {
     let mut table = Table::new(fmt);
 
     for path in paths {
-        let meta = path.metadata()?;
+        let metadata = path.metadata()?;
+
+        let uid = metadata.uid();
+        let user = get_user_by_uid(uid)
+            .map(|u| u.name().to_string_lossy().into_owned())
+            .unwrap_or_else(|| uid.to_string());
+
+        let gid = metadata.gid();
+        let group = get_group_by_gid(gid)
+            .map(|g| g.name().to_string_lossy().into_owned())
+            .unwrap_or_else(|| gid.to_string());
+
+        let file_type = if path.is_dir() { "d" } else { "-" };
+        let perms = format_mode(metadata.mode());
+        let modified: DateTime<Local> = DateTime::from(metadata.modified()?);
+
         table.add_row(
             Row::new()
-                .with_cell(if meta.is_dir() { "d" } else { "-" }) // 1 "d" or "-"
-                .with_cell(format_mode(meta.mode())) // 2 permissions
-                .with_cell(meta.nlink()) // 3 number of links
-                .with_cell(
-                    users::get_user_by_uid(meta.uid())
-                        .unwrap()
-                        .name()
-                        .to_string_lossy(),
-                ) // 4 user name
-                .with_cell(
-                    users::get_group_by_gid(meta.gid())
-                        .unwrap()
-                        .name()
-                        .to_string_lossy(),
-                ) // 5 group name
-                .with_cell(meta.len()) // 6 size
-                .with_cell(
-                    chrono::DateTime::<chrono::Utc>::from(meta.modified().unwrap())
-                        .format("%b %e %y %R"),
-                ) // 7 modification
+                .with_cell(file_type) // 1 "d" or "-"
+                .with_cell(perms) // 2 permissions
+                .with_cell(metadata.nlink()) // 3 number of links
+                .with_cell(user) // 4 user name
+                .with_cell(group) // 5 group name
+                .with_cell(metadata.len()) // 6 size
+                .with_cell(modified.format("%b %d %y %H:%M")) // 7 modification
                 .with_cell(path.display()), // 8 path
         );
     }
@@ -132,15 +131,24 @@ fn format_output(paths: &[PathBuf]) -> MyResult<String> {
 /// Given a file mode in octal format like 0o751,
 /// return a string like "rwxr-x--x"
 fn format_mode(mode: u32) -> String {
-    let mut result = vec![];
-    for (sign, mask) in RIGHT_SIGN.repeat(3).into_iter().zip(RIGHT_MASKS.iter()) {
-        if mode & mask != 0 {
-            result.push(sign);
-        } else {
-            result.push("-");
-        }
-    }
-    result.join("")
+    format!(
+        "{}{}{}",
+        mk_triple(mode, Owner::User),
+        mk_triple(mode, Owner::Group),
+        mk_triple(mode, Owner::Other),
+    )
+}
+
+/// Given an octal number like 0o500 and an [`Owner`],
+/// return a string like "r-x"
+pub fn mk_triple(mode: u32, owner: Owner) -> String {
+    let [read, write, execute] = owner.masks();
+    format!(
+        "{}{}{}",
+        if mode & read == 0 { "-" } else { "r" },
+        if mode & write == 0 { "-" } else { "w" },
+        if mode & execute == 0 { "-" } else { "x" },
+    )
 }
 
 #[cfg(test)]
